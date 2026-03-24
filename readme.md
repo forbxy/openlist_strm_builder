@@ -33,7 +33,7 @@ python main.py config.py
 | `verify_strm` | 否 | `False` | 校验已生成的 STRM，不一致则更新 |
 | `verify_download` | 否 | `False` | 校验已下载的文件，不一致则重新下载 |
 | `encode_illegal_chars` | 否 | `True` | 自动 URL 编码文件名中的非法字符 |
-| `delete_orphaned` | 否 | `False` | 删除服务器不存在或不应生成的本地文件，清理空目录 |
+| `delete_orphaned` | 否 | `False` | 删除服务器不存在的本地 `.strm` 和下载格式文件，遇到其他类型文件立刻停止所有删除，清理空目录 |
 | `threads` | 否 | `4` | 并发线程数 |
 
 ## STRM 格式

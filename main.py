@@ -139,7 +139,9 @@ verify_download = False
 # 关闭时保留原始字符，如果有非法字符，可能导致生成 strm 或下载失败，默认开启
 encode_illegal_chars = True
 
-# 删除远程服务器不存在或不应生成 strm/下载但本地仍存在的文件，默认 False
+# 删除远程服务器不存在或不应生成 strm/下载但本地仍存在的文件
+# 只删除 .strm 文件和下载格式列表里的文件，遇到其他类型文件时立刻停止所有删除操作
+# 默认 False
 delete_orphaned = False
 
 # 并发线程数，默认 4
@@ -498,14 +500,38 @@ class StrmBuilder:
     # ------------------------------------------------------------------
 
     def _cleanup_orphaned(self, remote_local_paths: set[str]):
-        """删除本地存在但远程不存在或不应生成的文件"""
+        """删除本地存在但远程不存在或不应生成的文件
+        
+        只删除 .strm 文件和下载格式列表里的文件，
+        当遇到非这两种文件时，立刻停止所有删除行为。
+        """
+        allowed_exts = {".strm"} | self.download_exts
+        abort = False
+        to_delete = []
+
         for root, _dirs, files in os.walk(self.strm_path):
+            if abort:
+                break
             for fname in files:
                 fpath = os.path.normpath(os.path.join(root, fname))
-                if fpath not in remote_local_paths:
-                    os.remove(fpath)
-                    log.info("删除孤立文件: %s", fpath)
-                    self.stats["deleted"] += 1
+                if fpath in remote_local_paths:
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in allowed_exts:
+                    log.warning(
+                        "发现非 strm/下载格式的文件: %s，停止所有删除操作", fpath
+                    )
+                    abort = True
+                    break
+                to_delete.append(fpath)
+
+        if abort:
+            return
+
+        for fpath in to_delete:
+            os.remove(fpath)
+            log.info("删除孤立文件: %s", fpath)
+            self.stats["deleted"] += 1
 
         # 自底向上清理空目录
         for root, dirs, files in os.walk(self.strm_path, topdown=False):
