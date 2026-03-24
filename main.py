@@ -49,6 +49,7 @@ CONFIG_KEYS = {
     "strm_path": None,
     "strm_format": "http",
     "bluray_strm": False,
+    "infuse_compat": False,
     "video_extensions": [],
     "download_extensions": [],
     "verify_strm": False,
@@ -104,9 +105,15 @@ strm_format = "http"
 
 # 生成 Kodi 蓝光文件夹 STRM，默认 False
 # 开启后，当识别到目录下有 BDMV/index.bdmv 时，使用该目录名作为 STRM 文件名，
-# STRM 内容为 index.bdmv 的路径，且不再继续遍历该目录的子文件夹
-# 仅在 kodi_webdav 或 kodi_webdav_noauth 格式时生效
+# STRM 内容始终为 index.bdmv 的 kodi_webdav 路径（无论 strm_format 设置为何），
+# 且不再继续遍历该目录的子文件夹
 bluray_strm = False
+
+# 兼容 Infuse，默认 False
+# 仅在 strm_format 为 http 时生效
+# 开启后 strm 内容 URL 末尾追加 &type=f.{扩展名}，例如:
+#   http://server/d/xxx.mkv?sign=xxx&type=f.mkv
+infuse_compat = False
 
 # 需要生成 strm 的文件扩展名列表，为空则使用内置默认视频格式
 video_extensions = [
@@ -273,11 +280,13 @@ class StrmBuilder:
             sys.exit(1)
         self.strm_format = config.get("strm_format", "http")
         self.bluray_strm = config.get("bluray_strm", False)
-        if self.bluray_strm and self.strm_format not in ("kodi_webdav", "kodi_webdav_noauth"):
+
+        self.infuse_compat = config.get("infuse_compat", False)
+        if self.infuse_compat and self.strm_format != "http":
             log.warning(
-                "bluray_strm 仅在 strm_format 为 kodi_webdav 或 kodi_webdav_noauth 时有效，已忽略"
+                "infuse_compat 仅在 strm_format 为 http 时有效，已忽略"
             )
-            self.bluray_strm = False
+            self.infuse_compat = False
 
         self.video_exts = (
             set(e.lower() for e in config.get("video_extensions") or [])
@@ -408,8 +417,14 @@ class StrmBuilder:
             return self.strm_path / f"{stem}.strm"
         return self.strm_path / rel
 
-    def _strm_content(self, remote_path: str, sign: str) -> str:
+    def _strm_content(self, remote_path: str, sign: str, *, force_kodi_webdav: bool = False) -> str:
         encoded = quote(remote_path.lstrip("/"), safe="/")
+        if force_kodi_webdav:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.server)
+            scheme = "davs" if parsed.scheme == "https" else "dav"
+            userinfo = quote(self.username, safe="") + ":" + quote(self.password, safe="")
+            return f"{scheme}://{userinfo}@{parsed.netloc}/dav/{encoded}"
         if self.strm_format == "webdav":
             from urllib.parse import urlparse
             parsed = urlparse(self.server)
@@ -426,14 +441,22 @@ class StrmBuilder:
             parsed = urlparse(self.server)
             scheme = "davs" if parsed.scheme == "https" else "dav"
             return f"{scheme}://{parsed.netloc}/dav/{encoded}"
-        return f"{self.server}/d/{encoded}?sign={sign}"
+        url = f"{self.server}/d/{encoded}?sign={sign}"
+        if self.infuse_compat:
+            ext = PurePosixPath(remote_path).suffix.lstrip(".")
+            if ext:
+                url += f"&type=f.{ext}"
+        return url
 
     # ------------------------------------------------------------------
     # 文件处理
     # ------------------------------------------------------------------
 
     def _process_strm(self, finfo: dict, local: Path):
-        content = self._strm_content(finfo["path"], finfo["sign"])
+        content = self._strm_content(
+            finfo["path"], finfo["sign"],
+            force_kodi_webdav=bool(finfo.get("is_bluray")),
+        )
         if local.exists():
             if not self.verify_strm:
                 self.stats["strm_skipped"] += 1

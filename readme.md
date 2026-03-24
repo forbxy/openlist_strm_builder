@@ -26,7 +26,8 @@ python main.py config.py
 | `strm_path` | 是 | - | STRM 本地存储路径，必须是绝对路径 |
 | `refresh_paths` | 否 | 空 | 生成前先刷新的路径列表，逗号隔开 |
 | `strm_format` | 否 | `http` | STRM 内容格式，可选 `http` / `webdav` / `kodi_webdav` / `kodi_webdav_noauth` |
-| `bluray_strm` | 否 | `False` | 蓝光文件夹 STRM，识别到 BDMV/index.bdmv 时以目录名生成 STRM，只在 `kodi_webdav` 或 `kodi_webdav_noauth` 时生效 |
+| `bluray_strm` | 否 | `False` | 蓝光文件夹 STRM，识别到 BDMV/index.bdmv 时以目录名生成 STRM，内容始终使用 `kodi_webdav` 格式 |
+| `infuse_compat` | 否 | `False` | 兼容 Infuse，STRM URL 末尾追加 `&type=f.{扩展名}`，仅 `http` 格式时生效 |
 | `video_extensions` | 否 | 内置视频格式 | 需要生成 STRM 的文件扩展名列表 |
 | `download_extensions` | 否 | 内置字幕格式 | 需要直接下载的文件扩展名列表 |
 | `verify_strm` | 否 | `False` | 校验已生成的 STRM，不一致则更新 |
