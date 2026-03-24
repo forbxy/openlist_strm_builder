@@ -48,6 +48,7 @@ CONFIG_KEYS = {
     "refresh_paths": "",
     "strm_path": None,
     "strm_format": "http",
+    "bluray_strm": False,
     "video_extensions": [],
     "download_extensions": [],
     "verify_strm": False,
@@ -100,6 +101,12 @@ strm_path = ""
 #   kodi_webdav:       dav(s)://用户名:密码@ip:port/dav/{编码路径}
 #   kodi_webdav_noauth: dav(s)://ip:port/dav/{编码路径} (需openlist开启匿名访问(不推荐)或 kodi 已挂载)
 strm_format = "http"
+
+# 生成 Kodi 蓝光文件夹 STRM，默认 False
+# 开启后，当识别到目录下有 BDMV/index.bdmv 时，使用该目录名作为 STRM 文件名，
+# STRM 内容为 index.bdmv 的路径，且不再继续遍历该目录的子文件夹
+# 仅在 kodi_webdav 或 kodi_webdav_noauth 格式时生效
+bluray_strm = False
 
 # 需要生成 strm 的文件扩展名列表，为空则使用内置默认视频格式
 video_extensions = [
@@ -185,19 +192,44 @@ class OpenListClient:
             )
         return data["data"]
 
-    def walk(self, root: str) -> list:
+    def walk(self, root: str, *, bluray_strm: bool = False) -> list:
         """递归遍历目录，返回所有文件信息列表"""
         result = []
-        self._walk(root, result)
+        self._walk(root, result, bluray_strm=bluray_strm)
         return result
 
-    def _walk(self, path: str, result: list):
+    def _walk(self, path: str, result: list, *, bluray_strm: bool = False):
         data = self.list_dir(path)
         content = data.get("content") or []
+
+        # 蓝光文件夹检测：当前目录包含 BDMV/index.bdmv 时生成蓝光 STRM
+        if bluray_strm:
+            dir_items = {item["name"].lower(): item["name"] for item in content if item.get("is_dir")}
+            if "bdmv" in dir_items:
+                bdmv_name = dir_items["bdmv"]
+                bdmv_path = f"{path.rstrip('/')}/{bdmv_name}"
+                try:
+                    bdmv_data = self.list_dir(bdmv_path)
+                    bdmv_content = bdmv_data.get("content") or []
+                    for bdmv_item in bdmv_content:
+                        if bdmv_item["name"].lower() == "index.bdmv" and not bdmv_item.get("is_dir"):
+                            index_path = f"{bdmv_path}/{bdmv_item['name']}"
+                            result.append({
+                                "name": PurePosixPath(path).name,
+                                "path": index_path,
+                                "size": bdmv_item.get("size", 0),
+                                "sign": bdmv_item.get("sign", ""),
+                                "is_bluray": True,
+                                "bluray_dir": path,
+                            })
+                            return  # 不再继续遍历子文件夹
+                except Exception:
+                    pass  # BDMV 目录列出失败，继续正常遍历
+
         for item in content:
             item_path = f"{path.rstrip('/')}/{item['name']}"
             if item.get("is_dir"):
-                self._walk(item_path, result)
+                self._walk(item_path, result, bluray_strm=bluray_strm)
             else:
                 result.append({
                     "name": item["name"],
@@ -240,6 +272,12 @@ class StrmBuilder:
             log.error("strm_path 必须是绝对路径: '%s'", config["strm_path"])
             sys.exit(1)
         self.strm_format = config.get("strm_format", "http")
+        self.bluray_strm = config.get("bluray_strm", False)
+        if self.bluray_strm and self.strm_format not in ("kodi_webdav", "kodi_webdav_noauth"):
+            log.warning(
+                "bluray_strm 仅在 strm_format 为 kodi_webdav 或 kodi_webdav_noauth 时有效，已忽略"
+            )
+            self.bluray_strm = False
 
         self.video_exts = (
             set(e.lower() for e in config.get("video_extensions") or [])
@@ -288,7 +326,7 @@ class StrmBuilder:
         for op in self.openlist_paths:
             log.info("开始遍历远程目录: %s", op)
             try:
-                remote_files.extend(self.client.walk(op))
+                remote_files.extend(self.client.walk(op, bluray_strm=self.bluray_strm))
             except Exception as e:
                 log.error("遍历远程目录失败 [%s]: %s", op, e)
                 walk_success = False
@@ -297,6 +335,9 @@ class StrmBuilder:
         strm_files = []
         dl_files = []
         for f in remote_files:
+            if f.get("is_bluray"):
+                strm_files.append(f)
+                continue
             ext = os.path.splitext(f["name"])[1].lower()
             if ext in self.video_exts:
                 strm_files.append(f)
@@ -311,7 +352,7 @@ class StrmBuilder:
         with ThreadPoolExecutor(max_workers=self.threads) as pool:
             futures = []
             for f in strm_files:
-                local = self._local_path(f["path"], is_strm=True)
+                local = self._local_path(f["path"], is_strm=True, bluray_dir=f.get("bluray_dir"))
                 remote_local_paths.add(os.path.normpath(local))
                 futures.append(pool.submit(self._process_strm, f, local))
 
@@ -349,8 +390,16 @@ class StrmBuilder:
             lambda m: quote(m.group(0), safe=""), name
         )
 
-    def _local_path(self, remote_path: str, *, is_strm: bool) -> Path:
+    def _local_path(self, remote_path: str, *, is_strm: bool, bluray_dir: str = None) -> Path:
         """将远程路径映射到本地路径: strm_path + 文件在openlist中的绝对路径"""
+        if bluray_dir:
+            # 蓝光目录: strm 文件以目录名命名，放在目录的父级
+            parts = PurePosixPath(bluray_dir).parts[1:]
+            sanitized = [self._sanitize_name(p) for p in parts]
+            parent_parts = sanitized[:-1]
+            dir_name = sanitized[-1] if sanitized else self._sanitize_name(PurePosixPath(bluray_dir).name)
+            parent_rel = os.path.join(*parent_parts) if parent_parts else ""
+            return self.strm_path / parent_rel / f"{dir_name}.strm"
         parts = PurePosixPath(remote_path).parts[1:]  # 去掉开头的 '/'
         sanitized = [self._sanitize_name(p) for p in parts]
         rel = os.path.join(*sanitized) if sanitized else ""
